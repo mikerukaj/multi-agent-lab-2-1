@@ -284,6 +284,40 @@ class LimitAndFailureTests(AgentTestCase):
         self.assertEqual(result.execution_result.stdout, "42\n")
 
 
+def write_then_finish_script(path: str) -> list:
+    return [
+        response(
+            [tool_use("w", "write_file", {"path": path, "content": "print('ok')\n"})], "tool_use"
+        ),
+        response([text_block("Done.")], "end_turn"),
+    ]
+
+
+class SharedWorkspaceTests(AgentTestCase):
+    def test_runs_given_the_same_workspace_build_in_one_folder(self) -> None:
+        shared = Path(self._tmp.name) / "shared"
+        script = write_then_finish_script("a.py") + write_then_finish_script("b.py")
+        agent = self.make_agent(FakeClient(script))
+
+        first = agent.run("Write a.py", workspace=shared)
+        second = agent.run("Write b.py", workspace=shared)
+
+        self.assertEqual(first.workspace, str(shared.resolve()))
+        self.assertEqual(second.workspace, str(shared.resolve()))
+        self.assertTrue((shared / "a.py").is_file())
+        self.assertTrue((shared / "b.py").is_file())
+        self.assertEqual(first.files_written, ["a.py"])
+        self.assertEqual(second.files_written, ["b.py"])
+
+    def test_without_workspace_each_run_gets_its_own_folder(self) -> None:
+        agent = self.make_agent(FakeClient(write_then_finish_script("a.py")))
+
+        result = agent.run("Write a.py")
+
+        self.assertEqual(Path(result.workspace).parent, self.config.workspace_root.resolve())
+        self.assertEqual(Path(result.workspace).name, result.run_id)
+
+
 class SandboxRequiredTests(AgentTestCase):
     def test_agent_refuses_to_start_without_docker(self) -> None:
         with mock.patch("tools.python_exec.shutil.which", return_value=None):

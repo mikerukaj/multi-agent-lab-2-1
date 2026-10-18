@@ -22,6 +22,7 @@ import anthropic
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
+from agents.llm import EFFORT_LEVELS, FALLBACK_BETA, MAX_TOKENS, refusal_message
 from agents.memory import SemanticMemory, SlidingWindowBuffer, Turn
 from tools import TOOL_DEFINITIONS, dispatch_tool
 from tools.file_tools import read_file
@@ -33,10 +34,7 @@ from tools.python_exec import (
     exec_python,
 )
 
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 MAX_STEPS_CAP = 10
-MAX_TOKENS = 16_000
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 TERMINAL_STATUSES = ("refused", "error")
 
 SYSTEM_PROMPT = """\
@@ -248,11 +246,17 @@ class CoderAgent:
         self._memory = SemanticMemory(self.config.chroma_path)
         self._graph = self._build_graph()
 
-    def run(self, task: str) -> CoderResult:
+    def run(self, task: str, workspace: Path | None = None) -> CoderResult:
         """Complete ``task`` and return the structured result.
 
         Model, tool, and limit failures are reported in the result's ``status``
         and ``error``; they are never raised.
+
+        Args:
+            task: What the code should do.
+            workspace: Folder to work in, created if missing. Callers that run
+                several tasks on one program pass the same folder each time. By
+                default the run gets a new ``workspace_root/<run_id>/`` folder.
 
         Raises:
             ValueError: if ``task`` is empty.
@@ -261,8 +265,12 @@ class CoderAgent:
             raise ValueError("task must not be empty")
         started = time.monotonic()
         run_id = new_run_id()
-        workspace = (self.config.workspace_root / run_id).resolve()
-        workspace.mkdir(parents=True)
+        if workspace is None:
+            workspace = (self.config.workspace_root / run_id).resolve()
+            workspace.mkdir(parents=True)
+        else:
+            workspace = workspace.resolve()
+            workspace.mkdir(parents=True, exist_ok=True)
         self._memory.add(run_id, "task", task)
 
         final = self._graph.invoke(
@@ -325,7 +333,7 @@ class CoderAgent:
             "steps": state["steps"] + [Step(step_count, _thought_text(response.content))],
         }
         if response.stop_reason == "refusal":
-            update.update(status="refused", error=_refusal_message(response.stop_details))
+            update.update(status="refused", error=refusal_message(response.stop_details))
         elif response.stop_reason == "tool_use" and step_count >= self.config.max_steps:
             update["status"] = "step_limit"
         elif response.stop_reason not in ("tool_use", "end_turn"):
@@ -502,7 +510,7 @@ def _parse_summary(response) -> dict:
     """Read the structured summary, tolerating a refusal or malformed text."""
     text = "".join(block.text for block in response.content if block.type == "text")
     if response.stop_reason == "refusal":
-        explanation = _refusal_message(response.stop_details)
+        explanation = refusal_message(response.stop_details)
         return {"plan": [], "explanation": explanation, "main_file": ""}
     try:
         data = json.loads(text)
@@ -553,21 +561,13 @@ def _add_usage(total: dict, usage) -> dict:
     }
 
 
-def _refusal_message(stop_details) -> str:
-    if stop_details is None:
-        return "The model declined the request."
-    return (
-        f"The model declined the request (category: {stop_details.category}): "
-        f"{stop_details.explanation}"
-    )
-
-
 def _describe_call(name: str, tool_input: dict) -> str:
     """Short label for a tool call, e.g. ``write_file fizzbuzz.py``."""
     return f"{name} {tool_input.get('path', '')}".strip()
 
 
-def _print_progress(step: Step) -> None:
+def print_step_progress(step: Step) -> None:
+    """Print one progress line for ``step`` to stderr, e.g. ``[step 2] exec_python main.py``."""
     calls = ", ".join(_describe_call(action.tool, action.input) for action in step.actions)
     print(f"[step {step.number}] {calls}", file=sys.stderr, flush=True)
 
@@ -590,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
             config = replace(config, max_steps=args.max_steps)
         if args.timeout is not None:
             config = replace(config, exec_timeout_seconds=args.timeout)
-        result = CoderAgent(config, on_step=_print_progress).run(args.task)
+        result = CoderAgent(config, on_step=print_step_progress).run(args.task)
     except (ValueError, SandboxUnavailableError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
