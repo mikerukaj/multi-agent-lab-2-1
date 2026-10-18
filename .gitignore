@@ -1,0 +1,29 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+.env*.local
+
+# Agent runtime data
+workspace/
+.chroma/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+.idea/
+
+# Claude & Speckit
+.claude/
+.specify/
+specs/
